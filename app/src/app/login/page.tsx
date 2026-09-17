@@ -1,11 +1,9 @@
 "use client";
 
 import { useState } from "react";
-import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 
 export default function LoginPage() {
-  const router = useRouter();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -29,8 +27,13 @@ export default function LoginPage() {
       return;
     }
 
-    router.push("/");
-    router.refresh();
+    // Navegação "dura" (não router.push): garante que o cookie de
+    // sessão já gravado pelo browser client vai junto na próxima
+    // requisição ao servidor. Com router.push, em conexões mais
+    // lentas (celular), o proxy.ts às vezes checava a sessão antes do
+    // cookie estar disponível e mandava de volta pro /login vazio.
+    // eslint-disable-next-line @next/next/no-location-assign-relative-destination
+    window.location.assign("/");
   }
 
   return (
