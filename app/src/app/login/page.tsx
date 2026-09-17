@@ -1,45 +1,17 @@
 "use client";
 
-import { useState } from "react";
-import { createClient } from "@/lib/supabase/client";
+import { useActionState } from "react";
+import { signIn, type LoginState } from "./actions";
+
+const initialState: LoginState = { error: null };
 
 export default function LoginPage() {
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
-  const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
-
-  async function handleSubmit(e: React.FormEvent) {
-    e.preventDefault();
-    setLoading(true);
-    setError(null);
-
-    const supabase = createClient();
-    const { error } = await supabase.auth.signInWithPassword({
-      email,
-      password,
-    });
-
-    setLoading(false);
-
-    if (error) {
-      setError(error.message);
-      return;
-    }
-
-    // Navegação "dura" (não router.push): garante que o cookie de
-    // sessão já gravado pelo browser client vai junto na próxima
-    // requisição ao servidor. Com router.push, em conexões mais
-    // lentas (celular), o proxy.ts às vezes checava a sessão antes do
-    // cookie estar disponível e mandava de volta pro /login vazio.
-    // eslint-disable-next-line @next/next/no-location-assign-relative-destination
-    window.location.assign("/");
-  }
+  const [state, formAction, pending] = useActionState(signIn, initialState);
 
   return (
     <div className="flex min-h-screen items-center justify-center px-4">
       <form
-        onSubmit={handleSubmit}
+        action={formAction}
         className="w-full max-w-sm space-y-4 rounded-lg border border-neutral-200 p-6 dark:border-neutral-800"
       >
         <div>
@@ -53,10 +25,9 @@ export default function LoginPage() {
           </label>
           <input
             id="email"
+            name="email"
             type="email"
             required
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
             className="w-full rounded-md border border-neutral-300 px-3 py-2 text-sm outline-none focus:border-neutral-500 dark:border-neutral-700 dark:bg-neutral-900"
           />
         </div>
@@ -67,22 +38,21 @@ export default function LoginPage() {
           </label>
           <input
             id="password"
+            name="password"
             type="password"
             required
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
             className="w-full rounded-md border border-neutral-300 px-3 py-2 text-sm outline-none focus:border-neutral-500 dark:border-neutral-700 dark:bg-neutral-900"
           />
         </div>
 
-        {error && <p className="text-sm text-red-600">{error}</p>}
+        {state.error && <p className="text-sm text-red-600">{state.error}</p>}
 
         <button
           type="submit"
-          disabled={loading}
+          disabled={pending}
           className="w-full rounded-md bg-neutral-900 px-3 py-2 text-sm font-medium text-white disabled:opacity-50 dark:bg-neutral-100 dark:text-neutral-900"
         >
-          {loading ? "Entrando..." : "Entrar"}
+          {pending ? "Entrando..." : "Entrar"}
         </button>
       </form>
     </div>
