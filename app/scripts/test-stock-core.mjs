@@ -40,6 +40,8 @@ async function cleanup() {
     await admin.from("customers").delete().eq("organization_id", ids.orgId);
     await admin.from("inventory_levels").delete().eq("organization_id", ids.orgId);
     await admin.from("stock_locations").delete().eq("organization_id", ids.orgId);
+    await admin.from("warehouses").delete().eq("organization_id", ids.orgId);
+    await admin.from("branches").delete().eq("organization_id", ids.orgId);
     await admin.from("product_variants").delete().eq("organization_id", ids.orgId);
     await admin.from("products").delete().eq("organization_id", ids.orgId);
     await admin.from("organizations").delete().eq("id", ids.orgId);
@@ -83,9 +85,23 @@ const { data: variant } = await admin
   .select("id")
   .single();
 
+const { data: branch } = await admin
+  .from("branches")
+  .insert({ organization_id: ids.orgId, code: "M", name: "Matriz teste" })
+  .select("id")
+  .single();
+ids.branchId = branch.id;
+
+const { data: warehouse } = await admin
+  .from("warehouses")
+  .insert({ branch_id: branch.id, code: "D1", name: "Depósito teste" })
+  .select("id")
+  .single();
+ids.warehouseId = warehouse.id;
+
 const { data: location } = await admin
   .from("stock_locations")
-  .insert({ organization_id: ids.orgId, name: "Depósito teste" })
+  .insert({ warehouse_id: warehouse.id, name: "Localização teste", rua: "01", coluna: "01", nivel: "A" })
   .select("id")
   .single();
 

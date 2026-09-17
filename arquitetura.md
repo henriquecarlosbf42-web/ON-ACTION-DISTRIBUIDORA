@@ -61,6 +61,27 @@ padrão pra qualquer dado crítico: se duas requisições simultâneas
 puderem corromper o dado, a regra vai pra função no banco, não pro
 código do app. Ver `spec-mestre-etapa3.md`.
 
+**Etapa 4 (2026-09-16) — hierarquia organização → filial → depósito →
+localização.** `stock_locations` (nome mantido de propósito, é a mesma
+tabela que `reserve_stock`/`fulfill_reservation` já usam desde a Etapa
+3 — trocar de nome quebraria as funções sem necessidade) ganhou
+endereço (rua/coluna/nível), capacidade (dimensões + volume calculado
++ **volume útil configurado manualmente**, nunca inferido da geometria)
+e um `warehouse_id` obrigatório. `branches` e `warehouses` são novas.
+
+**`organization_id` de `warehouses`/`stock_locations` é derivado por
+trigger**, não aceito do cliente — a etapa pedia explicitamente
+"proteção contra acesso cruzado" e "validação de filial e depósito";
+deixar esse campo gravável direto seria um jeito de uma organização
+mal-intencionada anexar um depósito à conta de outra. `branches` (raiz
+da hierarquia, sem pai) continua usando só a RLS normal
+(`is_org_member`), não precisa de trigger.
+
+**Corrigido:** `product_variants.sku` era único *globalmente* desde a
+Etapa 1 — bug de multi-tenant que ninguém tinha notado (dois clientes
+não conseguiriam usar o mesmo SKU). Virou único por organização. Ver
+`spec-mestre-etapa4.md`.
+
 ## Modelo conceitual
 
 Ver `supabase/migrations/00000000000001_foundation.sql` (Etapa 1) +
@@ -77,17 +98,33 @@ segunda altera a primeira).
   existirem
 
 **Comercial (por organização):** `customers` (b2b/b2c), `categories`,
-`products`, `product_variants` (SKU), `orders`, `order_items`
+`products`, `product_variants` (SKU único por org, `barcode`,
+dimensões/peso), `orders`, `order_items`
 
 **Global (não pertence a nenhuma organização):** `units`,
 `sales_channels` (site, mercado_livre, shopee, manual — são *tipos* de
 canal, a plataforma inteira usa os mesmos 4)
 
-**Estoque (por organização):** `stock_locations`, `inventory_levels`,
-`stock_reservations` (+ `status`, `idempotency_key`), `stock_movements`
-(+ `idempotency_key`, `reservation_id`). `stock_availability` é uma
-*view* (não tabela) — físico − reservado ativo, calculada, nunca
-guardada.
+**Estoque (por organização):** `branches` → `warehouses` →
+`stock_locations` (endereço `rua/coluna/nivel` + `full_code` gerado,
+capacidade `volume_total_m3` calculado + `volume_util_m3` manual +
+`max_weight_kg`) → `inventory_levels`, `stock_reservations` (+
+`status`, `idempotency_key`), `stock_movements` (+ `idempotency_key`,
+`reservation_id`). `location_types` é configurável por organização
+(picking, pulmão, doca...), não uma lista fixa da plataforma.
+`stock_availability` é uma *view* (não tabela) — físico − reservado
+ativo, calculada, nunca guardada.
+
+**Desenhado na Etapa 4, não implementado ainda** (sem consumidor real
+— nenhuma tela/fluxo usando endereço de verdade): `picking_waves` +
+`picking_wave_orders` + `picking_tasks` + `picking_task_items`
+(onda → pedido → tarefa por localização); `replenishment_tasks` +
+`min_quantity`/`max_quantity` por localização; `inventory_sessions` +
+`inventory_counts` + `inventory_adjustments` (contagem por código de
+barras, ajuste sempre via função que gera `stock_movements`, nunca
+sobrescreve saldo direto); `stock_transfers` + `stock_transfer_items`
+(sempre duas pernas — saída da origem, entrada no destino — nunca um
+único UPDATE).
 
 **Integrações (por organização):** `external_integrations`
 (credenciais de ML/Shopee — sem policy de select/insert/update pra
@@ -119,21 +156,23 @@ projetos/ON-ACTION-DISTRIBUIDORA/
 │   │   │   └── domains/        # limites de domínio (platform
 │   │   │       ├── platform/   #   implementado nessa etapa)
 │   │   │       ├── comercial/  #   só README, sem lógica ainda
-│   │   │       ├── estoque/    #   idem
-│   │   │       └── integracoes/#   idem
+│   │   │       ├── estoque/    #   stock.ts + locations.ts implementados
+│   │   │       └── integracoes/#   só README, sem lógica ainda
 │   │   ├── proxy.ts            # refresh de sessão + redirect pra /login
 │   │   │                       # (Next.js 16 renomeou "middleware" pra "proxy")
 │   │   └── types/database.ts   # placeholder até gerar tipos reais
 │   ├── scripts/
-│   │   ├── test-tenant-isolation.mjs   # valida isolamento entre orgs
-│   │   └── test-stock-core.mjs         # valida concorrência/idempotência
+│   │   ├── test-tenant-isolation.mjs    # valida isolamento entre orgs
+│   │   ├── test-stock-core.mjs          # valida concorrência/idempotência
+│   │   └── test-location-hierarchy.mjs  # valida hierarquia + trigger de segurança
 │   └── .env.local (não versionado) / .env.example
 ├── supabase/
 │   ├── config.toml
 │   └── migrations/
 │       ├── 00000000000001_foundation.sql
 │       ├── 00000000000002_multi_tenant.sql
-│       └── 00000000000003_stock_core.sql
+│       ├── 00000000000003_stock_core.sql
+│       └── 00000000000004_estoque_localizacao.sql
 ├── site/ proposta/ conteudo/ ads/   # entregas não-técnicas do projeto
 ├── briefing.md
 └── CLAUDE.md
@@ -159,6 +198,10 @@ projetos/ON-ACTION-DISTRIBUIDORA/
   grant explícito só pra `authenticated`, `anon` sem acesso)
 - Concorrência (lock de linha) e idempotência (`idempotency_key`)
   validadas por script automatizado, não só por leitura do SQL
+- `organization_id` de `warehouses`/`stock_locations` é derivado por
+  trigger a partir do pai (`branch_id`/`warehouse_id`) — um valor
+  malicioso enviado pelo cliente é sobrescrito antes do RLS avaliar,
+  validado por script automatizado (`test-location-hierarchy.mjs`)
 
 ## Riscos e pendências
 
@@ -184,6 +227,13 @@ projetos/ON-ACTION-DISTRIBUIDORA/
       de fluxo real de uso do núcleo de estoque primeiro
 - [ ] Planos/assinaturas: desenho é `plans` + `organization_subscriptions`,
       mas sem modelo de cobrança definido as tabelas nem foram criadas
+- [ ] Picking por onda, reabastecimento, inventário com coletor e
+      transferências entre filiais: desenhados em `arquitetura.md`
+      (seção Modelo conceitual), nenhuma tabela criada ainda — sem
+      endereço real cadastrado, não tem o que testar
+- [ ] `location_types` existe mas nenhum tipo foi cadastrado ainda —
+      é o Carlos quem configura (picking/pulmão/doca), não é seed da
+      plataforma
 - [ ] Deploy na Vercel: não configurado ainda
 
 ## Validação
@@ -211,6 +261,16 @@ vendendo em dobro); (3) efetivação — baixa o físico corretamente e
 gera a movimentação. Isolamento entre organizações re-validado depois
 da mudança de RLS (`test-tenant-isolation.mjs`, continua 3/3).
 
+**Etapa 4 (2026-09-16):** lint e build sem erros após a hierarquia de
+localização. `test-stock-core.mjs` re-executado do zero (agora criando
+filial+depósito antes da localização) — continua 3/3. Novo
+`test-location-hierarchy.mjs` valida 4 pontos: (1) código de filial
+único por organização; (2) mesmo código em organizações diferentes não
+colide; (3) `organization_id` malicioso enviado num INSERT de
+`warehouse` é ignorado — o trigger deriva o valor certo a partir do
+`branch_id` real; (4) isolamento entre organizações em `branches` e
+`warehouses`. 4/4.
+
 ## Não implementado nessa etapa (por escopo)
 
 **Etapa 2:** Catálogo digital, e-commerce B2C, portal B2B, CRM, WMS
@@ -224,3 +284,10 @@ pending→approved→executed foi pensado, tabela não criada), dashboards
 (dependem de eventos de WMS que não existem), planos/assinaturas
 (modelo de cobrança não definido), chamada real a Mercado Livre/Shopee
 (sem endpoint inventado sem checar documentação oficial).
+
+**Etapa 4:** picking por onda, reabastecimento, inventário com coletor
+de código de barras, transferências entre filiais/depósitos — as 4
+famílias de tabela estão desenhadas no Modelo conceitual acima, mas
+nenhuma foi criada: todas dependem de endereço/localização real
+existindo primeiro, e a etapa pediu explicitamente pra não construir o
+WMS inteiro de uma vez.
