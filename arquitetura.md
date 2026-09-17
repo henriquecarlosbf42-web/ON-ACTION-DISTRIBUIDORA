@@ -50,6 +50,17 @@ seguro porque o banco estava vazio. Daqui pra frente, mudança de schema
 `dqcnhkzdtwxjfhzstrmm`), criado e linkado. Não existe mais estado
 "sem projeto" — isso já foi resolvido.
 
+**Etapa 3 (2026-09-16) — núcleo de estoque escreve só via função.**
+`inventory_levels`, `stock_reservations` e `stock_movements` viraram
+somente-leitura pro cliente (`select` apenas na RLS). Toda escrita
+passa por `reserve_stock()` / `release_reservation()` /
+`fulfill_reservation()` — funções `security definer` que fazem lock de
+linha (concorrência), checam `idempotency_key` (retry seguro) e gravam
+em `audit_log` na mesma transação. Isso vale a partir de agora como
+padrão pra qualquer dado crítico: se duas requisições simultâneas
+puderem corromper o dado, a regra vai pra função no banco, não pro
+código do app. Ver `spec-mestre-etapa3.md`.
+
 ## Modelo conceitual
 
 Ver `supabase/migrations/00000000000001_foundation.sql` (Etapa 1) +
@@ -73,16 +84,24 @@ segunda altera a primeira).
 canal, a plataforma inteira usa os mesmos 4)
 
 **Estoque (por organização):** `stock_locations`, `inventory_levels`,
-`stock_reservations`, `stock_movements`
+`stock_reservations` (+ `status`, `idempotency_key`), `stock_movements`
+(+ `idempotency_key`, `reservation_id`). `stock_availability` é uma
+*view* (não tabela) — físico − reservado ativo, calculada, nunca
+guardada.
 
 **Integrações (por organização):** `external_integrations`
 (credenciais de ML/Shopee — sem policy de select/insert/update pra
-usuários autenticados; só `service_role` acessa)
+usuários autenticados; só `service_role` acessa), `external_references`
+(mapeia produto/pedido interno ↔ ID externo do canal),
+`integration_sync_logs` (idempotência, tentativa, status, erro —
+histórico de sincronização). As duas novas também são somente-leitura
+pro cliente.
 
-Módulos de CRM e WMS mais completos (funil de vendas, picking,
-conferência, packing, expedição) ficam pra próxima etapa — a Etapa 2 só
-estruturou os limites dos domínios (`lib/domains/*`), sem implementar
-lógica de negócio.
+Módulos de CRM e WMS operacional (recebimento, picking, conferência,
+packing, expedição), IA/slotting e dashboards ficam pra próxima etapa —
+a Etapa 3 entregou o núcleo de estoque e a fundação de integrações;
+CRM/WMS/IA/dashboards ainda são só limites de domínio documentados
+(`lib/domains/*`), sem tabela nem lógica própria.
 
 ## Estrutura de pastas
 
@@ -105,13 +124,16 @@ projetos/ON-ACTION-DISTRIBUIDORA/
 │   │   ├── proxy.ts            # refresh de sessão + redirect pra /login
 │   │   │                       # (Next.js 16 renomeou "middleware" pra "proxy")
 │   │   └── types/database.ts   # placeholder até gerar tipos reais
-│   ├── scripts/test-tenant-isolation.mjs   # valida isolamento entre orgs
+│   ├── scripts/
+│   │   ├── test-tenant-isolation.mjs   # valida isolamento entre orgs
+│   │   └── test-stock-core.mjs         # valida concorrência/idempotência
 │   └── .env.local (não versionado) / .env.example
 ├── supabase/
 │   ├── config.toml
 │   └── migrations/
 │       ├── 00000000000001_foundation.sql
-│       └── 00000000000002_multi_tenant.sql
+│       ├── 00000000000002_multi_tenant.sql
+│       └── 00000000000003_stock_core.sql
 ├── site/ proposta/ conteudo/ ads/   # entregas não-técnicas do projeto
 ├── briefing.md
 └── CLAUDE.md
@@ -131,24 +153,37 @@ projetos/ON-ACTION-DISTRIBUIDORA/
   antigo `middleware.ts`)
 - Isolamento entre organizações validado por script automatizado (ver
   Validação abaixo), não só por inspeção manual das policies
+- `inventory_levels`/`stock_reservations`/`stock_movements`: nenhuma
+  escrita direta pra `authenticated`, só via `reserve_stock()` /
+  `release_reservation()` / `fulfill_reservation()` (security definer,
+  grant explícito só pra `authenticated`, `anon` sem acesso)
+- Concorrência (lock de linha) e idempotência (`idempotency_key`)
+  validadas por script automatizado, não só por leitura do SQL
 
 ## Riscos e pendências
 
 - [ ] Gerar tipos reais (`supabase gen types typescript --linked`) e
       substituir `src/types/database.ts` — os casts manuais
-      (`as { data: X }`) em `page.tsx` e `domains/platform/organizations.ts`
-      somem quando isso acontecer
+      (`as { data: X }`) somem quando isso acontecer
 - [ ] Papéis (`role` em `organization_members`) hoje só distinguem
       "é membro" pra leitura/escrita geral e "é admin" pra gerenciar
       membros — restrição fina por papel em cada domínio (ex: só
-      "estoque" edita `stock_*`) fica pra quando os módulos existirem
-- [ ] `audit_log` tem estrutura e RLS, mas nada escreve nele ainda —
-      instrumentar quando as primeiras ações de negócio existirem
+      "estoque" chama `fulfill_reservation`) fica pra quando os módulos
+      existirem
+- [ ] `audit_log` instrumentado só pras 3 ações do núcleo de estoque
+      (reserve/release/fulfill) — outras ações de negócio (pedido
+      criado, cliente editado) ainda não logam nada
 - [ ] Seletor de organização (UI): não existe — só importa quando
       houver um usuário com mais de uma membership de verdade
 - [ ] Integração real com Mercado Livre e Shopee: não implementada.
-      `sales_channels` e `external_integrations` são só a fundação de
-      dados pra isso
+      `external_references`/`integration_sync_logs` são só a estrutura
+      de mapeamento e log — nenhuma chamada real às APIs foi feita nem
+      documentação oficial consultada ainda
+- [ ] WMS operacional (recebimento/picking/conferência/packing/
+      expedição), IA de slotting e dashboards: não existem — dependem
+      de fluxo real de uso do núcleo de estoque primeiro
+- [ ] Planos/assinaturas: desenho é `plans` + `organization_subscriptions`,
+      mas sem modelo de cobrança definido as tabelas nem foram criadas
 - [ ] Deploy na Vercel: não configurado ainda
 
 ## Validação
@@ -166,10 +201,26 @@ com `node scripts/test-tenant-isolation.mjs` sempre que a RLS mudar.
 Organização real criada pro Carlos usar: **ON ACTION Distribuidora**
 (`admin@onaction.com.br`, papel `admin`).
 
+**Etapa 3 (2026-09-16):** lint e build sem erros após o núcleo de
+estoque. `app/scripts/test-stock-core.mjs` cria organização + produto +
+saldo reais e valida 3 regras críticas: (1) idempotência — duas
+chamadas com a mesma `idempotency_key` retornam a mesma reserva; (2)
+concorrência — duas reservas simultâneas concorrendo pelo mesmo saldo
+resultam em exatamente uma sucesso e uma falha (nunca duas sucessos
+vendendo em dobro); (3) efetivação — baixa o físico corretamente e
+gera a movimentação. Isolamento entre organizações re-validado depois
+da mudança de RLS (`test-tenant-isolation.mjs`, continua 3/3).
+
 ## Não implementado nessa etapa (por escopo)
 
-Catálogo digital, e-commerce B2C, portal B2B, CRM, WMS completo,
-dashboards/relatórios, integrações ML/Shopee, seletor de organização,
-restrição de RLS por papel. A Etapa 2 só entregou a fundação
-multi-tenant (isolamento de dados + limites de domínio), conforme o
-master prompt.
+**Etapa 2:** Catálogo digital, e-commerce B2C, portal B2B, CRM, WMS
+completo, dashboards/relatórios, integrações ML/Shopee, seletor de
+organização, restrição de RLS por papel.
+
+**Etapa 3:** WMS operacional (recebimento/picking/conferência/packing/
+expedição — sem tela/fluxo real ainda, construir agora seria estrutura
+sem uso), IA/slotting (motor de cálculo — só o desenho do fluxo
+pending→approved→executed foi pensado, tabela não criada), dashboards
+(dependem de eventos de WMS que não existem), planos/assinaturas
+(modelo de cobrança não definido), chamada real a Mercado Livre/Shopee
+(sem endpoint inventado sem checar documentação oficial).
